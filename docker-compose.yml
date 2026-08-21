@@ -1,0 +1,22 @@
+services:
+  userbot:
+    build: .
+    container_name: telegram_userbot
+    env_file:
+      - .env
+    environment:
+      # ساعت خودِ کانتینر، تا خطوط لاگ هم به وقت محلی خوانده شوند. زمان‌های
+      # داخل پیام‌های تلگرام مستقل از این تنظیم درست‌اند (DISPLAY_TIMEZONE در
+      # کد اعمال می‌شود)؛ این فقط برای خواندن لاگ است.
+      TZ: ${TZ:-Asia/Tehran}
+    volumes:
+      # فقط پوشه حالت mount می‌شود، نه کل پروژه.
+      # فایل سشن و logger.db روی میزبان می‌مانند تا ری‌استارت یا rebuild
+      # کانتینر، لاگین و کش پیام‌ها را پاک نکند.
+      #
+      # قبلا کل پروژه (./:/app) mount می‌شد؛ آن حالت کدِ داخل ایمیج را
+      # با کدِ میزبان جایگزین می‌کرد و عملا build را بی‌اثر می‌ساخت.
+      # حالا کد از ایمیج می‌آید، پس بعد از تغییر کد باید rebuild کرد:
+      #   docker compose up --build
+      - ./data:/app/data
+    restart: unless-stopped

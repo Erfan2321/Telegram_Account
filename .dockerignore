@@ -1,0 +1,38 @@
+# --- اسرار (از طریق env_file تزریق می‌شوند، نه داخل ایمیج) ---
+.env
+
+# --- حالت زمان اجرا (از طریق volume می‌آید، نه داخل ایمیج) ---
+data/
+*.session
+*.session-journal
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- محیط مجازی و کش پایتون ---
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# --- گیت و ابزارها ---
+.git/
+.gitignore
+.idea/
+.zed/
+.vscode/
+.claude/
+
+# --- مستندات ---
+README.md
+ARCHITECTURE.md
+
+# --- سیستم‌عامل ---
+.DS_Store
+Thumbs.db
+
+# --- خود فایل‌های داکر ---
+Dockerfile
+.dockerignore
+docker-compose.yml

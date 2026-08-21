@@ -1,0 +1,12 @@
+# kurigram is a maintained fork of Pyrogram, kept on a current MTProto layer.
+# The swap is not cosmetic: Telegram refuses to deliver view-once and one-time
+# media (photo, video note, voice) to a client that announces an old layer —
+# the update arrives as messageMediaUnsupported with no payload at all, so the
+# TTL guard has nothing to download. pyrogram 2.0.106 is stuck on layer 158
+# (mid-2023) and one-time voice/video messages shipped in January 2024.
+# It installs as the `pyrogram` package, so imports are unchanged.
+kurigram==2.2.24
+TgCrypto==1.2.5
+python-dotenv==1.2.1
+aiosqlite==0.22.1
+aiohttp==3.13.3
