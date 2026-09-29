@@ -62,7 +62,9 @@ from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
 import config
 from utils import paths
-from utils.helpers import flood_seconds, respond, safe_handler, time_text
+from utils.helpers import (
+    contact_lines, flood_seconds, respond, safe_handler, time_text,
+)
 from utils.media import named_buffer
 
 log = logging.getLogger(__name__)
@@ -830,43 +832,60 @@ async def _resend_to_saved(client, spec: _Media, buf, caption: str) -> str:
     return await as_document(failure)
 
 
-def _sender_name(users, user_id: int) -> str:
-    """Display name of the sender, from the update's own user map."""
+def _peer(users, user_id: int):
+    """The sender's entry in the update's own user map, or None."""
     try:
-        user = users.get(user_id)
-        if user is None:
-            return "ناشناس"
+        return users.get(user_id)
+    except Exception:
+        # `users` is handed to us by the dispatcher; a shape that does not
+        # answer .get() must not cost the rescue its report.
+        return None
 
+
+def _sender_name(user) -> str:
+    """Display name of the sender."""
+    try:
         first = getattr(user, "first_name", "") or ""
         last = getattr(user, "last_name", "") or ""
-        name = (first + " " + last).strip()
-
-        username = getattr(user, "username", "") or ""
-        if username:
-            name = f"{name} (@{username})".strip()
-
-        return name or "ناشناس"
+        return (first + " " + last).strip() or "ناشناس"
     except Exception:
         return "ناشناس"
 
 
-def _header(kind: str, ttl: int, sender_name: str) -> str:
+def _sender_block(users, user_id: int) -> str:
+    """
+    Who the media came from: the display name, then the lines that identify
+    the account itself.
+
+    The username used to be glued onto the display name and the numeric id was
+    left out altogether. Both now go through contact_lines(), so a rescued
+    one-time photo says who sent it in the same terms everywhere — and a
+    sender with no username and no shared phone number is still identifiable
+    by number rather than by a display name he can change.
+    """
+    user = _peer(users, user_id)
+    return (
+        f"👤 <b>فرستنده:</b> {html.escape(_sender_name(user))}\n"
+        + contact_lines(user, user_id)
+    )
+
+
+def _header(kind: str, ttl: int, sender: str) -> str:
     """
     Common first block of both the success report and the failure report.
 
-    The sender's numeric id is deliberately not shown: it is noise in a chat,
-    it is already recoverable from the chat itself, and it made every report a
-    line longer for no reader's benefit.
+    `sender` arrives ready-made from _sender_block() — name and identity
+    lines, already escaped.
     """
     return (
-        f"👤 <b>فرستنده:</b> {html.escape(sender_name)}\n"
+        f"{sender}\n"
         f"📎 <b>نوع:</b> {_KIND_LABELS.get(kind, kind)}\n"
         f"⏱ <b>تایمر:</b> {_describe_ttl(ttl)}\n"
         f"🕐 <b>زمان:</b> {time_text()}"
     )
 
 
-def _build_caption(spec: _Media, ttl: int, sender_name: str,
+def _build_caption(spec: _Media, ttl: int, sender: str,
                    original_caption: str) -> str:
     """
     Build the report that accompanies the saved media.
@@ -881,7 +900,7 @@ def _build_caption(spec: _Media, ttl: int, sender_name: str,
     caption towards the limit for no benefit. It goes to the log instead.
     """
     text = "🕵️ <b>مدیای زمان‌دار ذخیره شد</b>\n\n" + _header(
-        spec.kind, ttl, sender_name
+        spec.kind, ttl, sender
     )
 
     if original_caption:
@@ -898,7 +917,7 @@ def _build_caption(spec: _Media, ttl: int, sender_name: str,
     return text
 
 
-async def _report_failure(client, kind, ttl, sender_name,
+async def _report_failure(client, kind, ttl, sender,
                           reason: str, media) -> None:
     """
     Tell the user, in Saved Messages, that a rescue did not happen.
@@ -909,7 +928,7 @@ async def _report_failure(client, kind, ttl, sender_name,
     """
     text = (
         "⚠️ <b>مدیای زمان‌دار ذخیره نشد</b>\n\n"
-        + _header(kind, ttl, sender_name)
+        + _header(kind, ttl, sender)
         + f"\n❗️ <b>دلیل:</b> <code>{html.escape(reason)}</code>\n\n"
         "اگر پیام روی گوشی یا دستگاه دیگری زودتر باز شده باشد، فایل دیگر روی "
         "سرور در دسترس نیست و هیچ راهی برای بازیابی‌اش نمانده."
@@ -987,7 +1006,7 @@ async def ttl_media_guard(client, update, users, chats):
     if config.TTL_GUARD_DEBUG:
         log.info("TTL media structure: %s", _dump(message.media))
 
-    sender_name = _sender_name(users, chat_id)
+    sender = _sender_block(users, chat_id)
     spec = None
     kind = "?"
 
@@ -1008,7 +1027,7 @@ async def ttl_media_guard(client, update, users, chats):
         detail = f"{type(e).__name__}: {e}"
         log.warning("TTL media download failed in chat %s: %s", chat_id, detail)
         _record_event(kind, "خطا در دانلود", detail)
-        await _report_failure(client, kind, ttl, sender_name,
+        await _report_failure(client, kind, ttl, sender,
                               detail, message.media)
         return
 
@@ -1018,7 +1037,7 @@ async def ttl_media_guard(client, update, users, chats):
         _STATS["lost"] += 1
         log.warning("TTL media in chat %s could not be fetched: %s", chat_id, reason)
         _record_event(kind, "دانلود نشد", reason)
-        await _report_failure(client, kind, ttl, sender_name,
+        await _report_failure(client, kind, ttl, sender,
                               reason, message.media)
         return
 
@@ -1029,7 +1048,7 @@ async def ttl_media_guard(client, update, users, chats):
             # has no meaning inside a Telegram message.
             log.info("kept a local copy at %s", local_path)
 
-    caption = _build_caption(spec, ttl, sender_name, message.message or "")
+    caption = _build_caption(spec, ttl, sender, message.message or "")
 
     try:
         note = await _resend_to_saved(client, spec, buf, caption)
@@ -1053,14 +1072,14 @@ async def ttl_media_guard(client, update, users, chats):
             detail = f"{type(e2).__name__}: {e2}"
             log.warning("Saving TTL media failed after FloodWait: %s", detail)
             _record_event(kind, "خطا در ارسال", detail)
-            await _report_failure(client, kind, ttl, sender_name,
+            await _report_failure(client, kind, ttl, sender,
                                   detail, message.media)
     except Exception as e:
         _STATS["failed"] += 1
         detail = f"{type(e).__name__}: {e}"
         log.warning("Saving TTL media failed: %s", detail)
         _record_event(kind, "خطا در ارسال", detail)
-        await _report_failure(client, kind, ttl, sender_name,
+        await _report_failure(client, kind, ttl, sender,
                               detail, message.media)
     finally:
         try:

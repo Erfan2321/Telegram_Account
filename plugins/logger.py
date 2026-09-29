@@ -24,7 +24,7 @@ from utils.db_manager import (
     MESSAGE_TTL, consume_ignored_deletion, get_message, save_message,
     set_local_media_path,
 )
-from utils.helpers import describe, flood_seconds, time_text
+from utils.helpers import contact_lines, describe, flood_seconds, time_text
 
 log = logging.getLogger(__name__)
 
@@ -229,6 +229,70 @@ async def _cache_media_file(client, message, media, media_type):
         log.warning("could not pre-cache a %s: %s", media_type, describe(e))
 
 
+# How long a resolved identity is reused, and how many are kept.
+# A username or a phone number changes rarely, while a single deletion can
+# produce a hundred reports from one chat at once — one lookup has to serve
+# all of them. The cap is a leak guard, not a tuning knob.
+IDENTITY_TTL = 3600
+
+# A failed lookup is kept far more briefly. It still has to absorb a burst of
+# reports from one chat, but the commonest reasons for it — a FloodWait, a
+# network blip — pass in seconds, and an hour of caching would go on answering
+# with a bare number long after the peer became reachable again.
+IDENTITY_MISS_TTL = 60
+
+IDENTITY_CACHE_MAX = 200
+
+# {chat_id: (expires_at, (display_name, contact_block))}
+_identities = {}
+
+
+async def _peer_identity(client, chat_id):
+    """
+    Return (display_name, contact_block) for the other side of a private chat.
+
+    Resolved here rather than stored with the message, and that is what makes
+    the phone number available in **both** directions: on a message we sent,
+    `from_user` is us, and the `Chat` object Pyrogram builds for the peer
+    carries no phone number at all. One lookup per chat answers for incoming
+    and outgoing alike.
+
+    This never raises. The row already holds the numeric chat id, and that
+    alone is a usable answer — so a peer that cannot be resolved (blocked,
+    deactivated, or simply a FloodWait at the wrong moment) degrades to the
+    number instead of costing the report.
+    """
+    now = time.time()
+
+    cached = _identities.get(chat_id)
+    if cached and now < cached[0]:
+        return cached[1]
+
+    user = None
+    try:
+        user = await client.get_users(chat_id)
+    except Exception as e:
+        # Debug, not warning: an unresolvable peer is an ordinary outcome here
+        # and the report still goes out with the numeric id.
+        log.debug("could not resolve peer %s: %s", chat_id, describe(e))
+
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    identity = ((first + " " + last).strip(), contact_lines(user, chat_id))
+
+    # Cleared wholesale rather than evicted one by one: the entries are
+    # interchangeable, the next report re-resolves in one call, and a bound
+    # that costs no bookkeeping is the right trade for a cache this small.
+    if len(_identities) >= IDENTITY_CACHE_MAX:
+        _identities.clear()
+    _identities[chat_id] = (
+        now + (IDENTITY_TTL if user is not None else IDENTITY_MISS_TTL),
+        identity,
+    )
+
+    return identity
+
+
 def _clock(stamp: float) -> str:
     """Format a timestamp for the report, in the configured display zone."""
     return time_text(stamp)
@@ -369,7 +433,7 @@ async def _report_one(client, msg):
     if not cached_msg:
         return
 
-    (_chat_id, sender_name, text, is_outgoing, cached_at,
+    (chat_id, sender_name, text, is_outgoing, cached_at,
      media_type, file_id, sent_at, local_path, media_meta) = cached_msg
 
     # Rows written before the sent_at column existed fall back to the cache
@@ -390,6 +454,11 @@ async def _report_one(client, msg):
     if sent_at:
         when += f" (بعد از {_elapsed(deleted_at - sent_at)})"
 
+    # Who the chat was with. On an outgoing message the cached sender name is
+    # only "شما", so the peer's own name has to come from the lookup — which is
+    # also the one thing the outgoing report never used to say at all.
+    peer_name, contact = await _peer_identity(client, chat_id)
+
     # The body is deliberately *not* wrapped in <code>. That tag renders the text
     # monospace and tap-to-copy, which made every report look like a code block
     # instead of the message it is quoting. It was only ever decorative — what
@@ -397,12 +466,17 @@ async def _report_one(client, msg):
     # in _escape_clip(), and that is untouched.
     if is_outgoing:
         # Outgoing message deletion (cannot distinguish initiator via Telegram MTProto event)
-        report = "🗑 <b>پیام خروجی شما حذف شد:</b> (توسط شما یا مخاطب)\n\n"
+        report = (
+            "🗑 <b>پیام خروجی شما حذف شد:</b> (توسط شما یا مخاطب)\n\n"
+            f"👤 <b>مخاطب:</b> {_escape_clip(peer_name or 'ناشناس', SENDER_BUDGET)}\n"
+        )
     else:
         report = (
             "🗑 <b>پیام حذف شده در پی‌وی:</b>\n\n"
             f"👤 <b>فرستنده:</b> {safe_sender}\n"
         )
+
+    report += contact + "\n"
 
     if media_type:
         report += f"📎 <b>نوع:</b> {MEDIA_LABELS.get(media_type, media_type)}\n"

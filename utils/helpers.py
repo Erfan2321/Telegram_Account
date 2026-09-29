@@ -108,6 +108,74 @@ def time_text(stamp: float | None = None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str
         return "؟"
 
 
+def _first_username(user) -> str:
+    """
+    The account's @username, whichever of the two shapes Telegram used.
+
+    A user carries either the single legacy `username` or — since collectible
+    usernames — a list in `usernames`, where only the active entries actually
+    resolve. The raw MTProto object and Pyrogram's parsed one agree on both
+    field names, so one reader serves the TTL guard and the deletion logger
+    alike.
+    """
+    single = getattr(user, "username", None)
+    if single:
+        return str(single)
+
+    for entry in getattr(user, "usernames", None) or []:
+        candidate = getattr(entry, "username", None)
+        if candidate and getattr(entry, "active", True):
+            return str(candidate)
+
+    return ""
+
+
+def contact_lines(user, user_id=None) -> str:
+    """
+    How to identify the other party in a report: @username and phone number.
+
+    Reports about a private chat name the person, and a display name alone is
+    not an identity — two contacts share one, and a person who renames himself
+    after the fact leaves the report pointing at nobody. The username and the
+    phone number are what stay pinned to the account.
+
+    Neither is guaranteed to exist: an account can publish no username, and a
+    phone number is only visible for a saved contact. When both are missing the
+    numeric id is written in their place, because it is always known — a
+    deletion report reaches this function holding the chat id even when the
+    peer itself could not be resolved.
+
+    Returned as ready-to-send **HTML** lines, escaped: `user` comes from the
+    other side of the conversation and is untrusted (§10.8). The phone and the
+    numeric id sit in <code> so they can be tapped to copy; the username is
+    left plain so Telegram links it to the chat itself.
+    """
+    lines = []
+
+    username = _first_username(user)
+    if username:
+        lines.append(f"🆔 <b>آیدی:</b> @{html.escape(username)}")
+
+    # Pyrogram renames the raw `phone` field to `phone_number`; either object
+    # can arrive here.
+    phone = getattr(user, "phone_number", None) or getattr(user, "phone", None)
+    if phone:
+        # Telegram stores the number bare. The leading + is stripped before it
+        # is added back so a value that already carries one is not doubled.
+        digits = html.escape(str(phone).strip().lstrip("+"))
+        if digits:
+            lines.append(f"📞 <b>شماره:</b> <code>+{digits}</code>")
+
+    if not lines:
+        numeric = getattr(user, "id", None) or user_id
+        lines.append(
+            f"🆔 <b>آیدی عددی:</b> <code>{html.escape(str(numeric))}</code>"
+            if numeric else "🆔 <b>آیدی عددی:</b> ؟"
+        )
+
+    return "\n".join(lines)
+
+
 def describe(error: BaseException, limit: int = 160) -> str:
     """
     A one-line **English** summary of an exception, for the log.
