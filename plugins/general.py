@@ -1,8 +1,8 @@
 """
 General Commands: Access control, information tools, message deletion, and forwarding.
 
-The shared authorization filter (AUTH_FILTER) is defined here and imported across
-other plugins to centralize permission management.
+The shared command filters (OWNER_FILTER and AUTH_FILTER) are defined here and
+imported across other plugins to centralize permission management.
 
 Conventions:
     - User-facing responses sent via `respond()` are in Persian.
@@ -37,14 +37,25 @@ log = logging.getLogger(__name__)
 PREFIXES = ["/", "."]
 
 
-# --- Dynamic Authorization Filter ---
+# --- Command Access Filters ---
 async def is_allowed_func(_, __, message):
     """Check whether the incoming message originates from an authorized user ID."""
     return bool(message.from_user and message.from_user.id in ALLOWED_USERS)
 
 
 dynamic_auth_filter = filters.create(is_allowed_func)
-AUTH_FILTER = filters.me | dynamic_auth_filter
+
+# Every command handler is built on one of these two, never on bare filters.me,
+# and both refuse forwarded messages: a forward is never a command. filters.me
+# also matches a message the owner forwards (from any device), and
+# filters.command reads text or caption, which a forward keeps verbatim — so
+# forwarding someone's ".del 10" into a chat would run it there, and an
+# authorized user's forward would run with their rights. The check sits before
+# filters.command, so a forward never even sets message.command. Passive
+# handlers (logger, auto-seen, TTL guard, enforcement, bot cleaner) keep their
+# own filters and still see forwards. ARCHITECTURE.md §8 has the limits.
+OWNER_FILTER = filters.me & ~filters.forwarded
+AUTH_FILTER = (filters.me | dynamic_auth_filter) & ~filters.forwarded
 
 # --- Message Deletion Configuration ---
 # Telegram accepts a maximum of 100 message IDs per deletion request.
@@ -121,7 +132,7 @@ def _target_from_reply_or_arg(message):
     return None
 
 
-@Client.on_message(filters.me & filters.command("adduser", prefixes=PREFIXES))
+@Client.on_message(OWNER_FILTER & filters.command("adduser", prefixes=PREFIXES))
 @safe_handler
 async def add_user_command(client, message):
     """Grant authorization to a user via reply or user ID."""
@@ -147,7 +158,7 @@ async def add_user_command(client, message):
     )
 
 
-@Client.on_message(filters.me & filters.command("deluser", prefixes=PREFIXES))
+@Client.on_message(OWNER_FILTER & filters.command("deluser", prefixes=PREFIXES))
 @safe_handler
 async def remove_user_command(client, message):
     """Revoke authorization from a user via reply or user ID."""

@@ -389,6 +389,10 @@ All AI commands accept a model alias and `extended` as leading words (`.ask pro 
 
 Prefixes are `["/", "."]`. Model and persona changes are owner-only on purpose: `.ask` costs tokens, and letting a third party rewrite the system prompt is a config-injection vector.
 
+**Forwards are never commands.** Every command handler is built on one of two filters from `plugins/general.py` — `OWNER_FILTER` (`filters.me & ~filters.forwarded`) or `AUTH_FILTER` (`(filters.me | authorized) & ~filters.forwarded`) — and never on bare `filters.me`. The library filter alone lets forwards in: kurigram's `me_filter` is `from_user.is_self or outgoing`, which is just as true of a message the owner *forwards*, from any device, and `filters.command` reads `text or caption`, which a forward keeps verbatim. Forwarding someone's message that began with `.del 10` into a chat used to run `.del 10` there, and an authorized user's forward ran with that user's rights — a forwarded `.gban` was a global ban. The forward check sits before `filters.command` in the `&` chain, so a forward never even sets `message.command`. The passive handlers — `ttl_guard` (−1), `group_admin.enforce_global_flags` (−2), `auto_seen` (1), `logger` (2), `bot_cleaner.watch_bot_chats` (3) — have filters of their own and still see forwards, as they must: a forwarded message is still one to rescue, enforce against, mark read or cache. Verified headlessly across every command handler, both prefixes and every `MessageOrigin` kind (user, hidden user, channel, chat, import), and through the real dispatcher with parsed raw updates.
+
+What no filter can see: a forward sent with *Hide sender's name* arrives as an ordinary message without a forward header, indistinguishable from typing it. The same is true of the copies this account makes itself (`.send`'s `ChatForwardsRestricted` fallback, `.fwd`'s protected path), but those do not come back through the library: kurigram hands an `RpcResult` to the call waiting for it and never to `handle_updates` (`session.py`), and `main.py` leaves `skip_updates=True`, so `recover_gaps()` never replays the account's own sends at startup. `.send`'s ordinary relay is a real forward and would be refused regardless. `link_forward._ECHOES` (§8.5) guards `.fwd` alone against that routing ever changing; turning `skip_updates` off would call for the same idea in front of every command.
+
 **`.price` / `.market` interaction flow.** Both names map to one handler (`market_prices_command`), registered with `filters.command(["price", "market"], ...)`. It is the reference implementation of the §10.3/§10.4 pattern that every handler in `general.py` now follows:
 
 ```
@@ -428,7 +432,7 @@ No `try/except` in the handler is deliberate: `get_market_prices()` never raises
 7. **Honest reporting.** Fewer relayed than requested (short history, skipped service messages, partial copy) appends a note stating the shortfall instead of silently under-delivering.
 8. **The summary is sent with `ParseMode.DISABLED`.** It interpolates the target's display name, which is arbitrary user text; an `_` or `*` would break Markdown rendering or make Telegram reject the message. The summary needs no formatting, so the parser is switched off entirely (§10.6). The usage/error strings only interpolate integers, so they keep their backticks.
 
-Access is `AUTH_FILTER`, matching every other utility command. **Be aware of what that means:** an authorized third party can pull messages out of *any* of the owner's private chats into a chat they can see. That is a deliberate consequence of the requested access level, not an oversight — narrow the decorator to `filters.me` if that reach is unwanted.
+Access is `AUTH_FILTER`, matching every other utility command. **Be aware of what that means:** an authorized third party can pull messages out of *any* of the owner's private chats into a chat they can see. That is a deliberate consequence of the requested access level, not an oversight — narrow the decorator to `OWNER_FILTER` if that reach is unwanted (not to bare `filters.me`, which lets forwards through — §8).
 
 ---
 
@@ -541,7 +545,7 @@ A prank module, requested as such. It runs a fake progress animation and reports
 
 ### 8.3.6 Access scope
 
-Every command here is `AUTH_FILTER`, matching the other utilities — so **an authorized third party can ban or globally ban people across all of the owner's managed groups**. That follows from the requested access level rather than being an oversight, and it is a much wider reach than `.weather`. Narrow the decorators to `filters.me` if that is unwanted. The one guard that is unconditional is `_guard_self()`: no command will act on the account running it.
+Every command here is `AUTH_FILTER`, matching the other utilities — so **an authorized third party can ban or globally ban people across all of the owner's managed groups**. That follows from the requested access level rather than being an oversight, and it is a much wider reach than `.weather`. Narrow the decorators to `OWNER_FILTER` if that is unwanted. The one guard that is unconditional is `_guard_self()`: no command will act on the account running it.
 
 ---
 
@@ -567,7 +571,7 @@ Known limit: the userbot cannot stop the push notification for the ad; the messa
 
 ## 8.5 Forward by link (`plugins/link_forward.py`)
 
-`.fwd <link> [link …]` brings the linked message into the chat the command is typed in (inside the same forum topic), then deletes the command message — only the forwarded content remains. With no link and sent as a reply, it reads links from the replied message, hidden hyperlinks (`text_link` entities) included. Owner only (`filters.me`): an authorized user could otherwise pull content out of every private channel the account is in.
+`.fwd <link> [link …]` brings the linked message into the chat the command is typed in (inside the same forum topic), then deletes the command message — only the forwarded content remains. With no link and sent as a reply, it reads links from the replied message, hidden hyperlinks (`text_link` entities) included. Owner only (`OWNER_FILTER`): an authorized user could otherwise pull content out of every private channel the account is in.
 
 **Links.** `t.me` / `telegram.me` / `telegram.dog`, public `/<username>/<id>` (also the `/s/` web form) and private `/c/<id>/<id>`, an optional topic segment, `?single` (that album item only; otherwise the whole album via `get_media_group`, in id order), `?comment=<id>` (resolved through the channel's `linked_chat`), and `tg://privatepost` / `tg://resolve`. A path deeper than topic/message is refused rather than read wrongly, and trailing sentence punctuation does not eat `?single`.
 
@@ -577,7 +581,7 @@ Known limit: the userbot cannot stop the push notification for the ad; the messa
 
 **Protected content.** Telegram refuses to forward from a chat with "Restrict saving content" (`ChatForwardsRestricted`, or the per-message `has_protected_content` flag, checked first to skip a doomed request), but serves the files to every member. So the message is rebuilt: text, polls, locations and contacts through `Message.copy()` (no file involved; source buttons dropped — only bots may send them), a sticker by id first, and every other kind downloaded into a per-run directory under `data/forward_tmp/` and uploaded again with its original duration, dimensions, preview, spoiler, streaming flag, waveform and caption entities (`ParseMode.DISABLED`, so a stray `*` stays a character). A protected album goes back as one `send_media_group`; anything that cannot be grouped goes item by item. The file on disk is named by us (`<id>_<kind><ext from mime>`) because Pyrogram joins the sender's file name onto the directory unchecked — `../../x` would escape — and the extension decides the mime type the senders re-guess; the original name travels only as the upload's `file_name` label. A file above the account's upload ceiling (2000 / 4000 MiB) is refused before downloading. Progress is edited into the command message at most every 4 s with direct, failure-swallowing edits — `respond()` would sleep out a FloodWait inside the transfer loop it is reporting on.
 
-**Echo guard.** A copy is a new message of ours. If its text or caption reads `.fwd <link>`, it matches this very command, and a post linking to itself would forward itself forever. Forwards are excluded by the filter (`~filters.forwarded`); copies register `(chat, text)` in `_ECHOES` *before* sending and the handler consumes the entry — the one-shot pattern of `IGNORE_DELETED_IDS` (§5.4), for the same reason: the update can arrive before the send call returns.
+**Echo guard.** A copy is a new message of ours. If its text or caption reads `.fwd <link>`, it matches this very command, and a post linking to itself would forward itself forever. Forwards are excluded by `OWNER_FILTER`, as for every command (§8); copies register `(chat, text)` in `_ECHOES` *before* sending and the handler consumes the entry — the one-shot pattern of `IGNORE_DELETED_IDS` (§5.4), for the same reason: the update can arrive before the send call returns.
 
 **Failures are per link.** A `LinkError` carries an English reason for the log and a Persian `.text` for the user (keeping the §10.2 language split without a second `MediaError`); other RPC errors are reported with their name, and a `FloodWait` stops the batch and marks the rest as not done. On any failure the command message is replaced by a per-link report instead of being deleted; the scratch directory is removed in a `finally` either way, and stale ones left by a killed run are swept after a day.
 
@@ -686,7 +690,11 @@ Compose used to mount the whole project (`./:/app`), which overlaid the image's 
     which the logging module stamps itself; the Telegram-facing times do not
     depend on either.
 
-11. **Schema change ⇒ idempotent migration** in `init_db()`.
+12. **Schema change ⇒ idempotent migration** in `init_db()`.
+
+13. **Build every command on `OWNER_FILTER` or `AUTH_FILTER`** (`plugins/general.py`), never
+    on bare `filters.me`. Both refuse forwarded messages; `filters.me` alone would run a
+    forwarded `.del 10` as if the owner had typed it (§8).
 
 ### Testing
 

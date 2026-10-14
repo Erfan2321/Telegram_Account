@@ -53,6 +53,7 @@ from pyrogram import Client, enums, filters, raw
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 
+from plugins.general import OWNER_FILTER
 from utils.db_manager import get_setting, mark_deletions_ignored, set_setting
 from utils.helpers import describe, flood_seconds, respond, safe_handler, time_text
 
@@ -457,7 +458,7 @@ def _status_text() -> str:
     return "\n".join(lines)
 
 
-@Client.on_message(filters.me & filters.command("botclean", prefixes=PREFIXES))
+@Client.on_message(OWNER_FILTER & filters.command("botclean", prefixes=PREFIXES))
 @safe_handler
 async def bot_clean_command(client, message):
     """Turn the cleaner on or off, or show its state."""

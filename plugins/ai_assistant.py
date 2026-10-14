@@ -26,7 +26,7 @@ from pyrogram.errors import FloodWait, MessageNotModified
 
 import config
 from plugins.ai_tools import friendly_error
-from plugins.general import AUTH_FILTER
+from plugins.general import AUTH_FILTER, OWNER_FILTER
 from utils.ai_context import (
     Collected,
     chat_history_text,
@@ -685,7 +685,7 @@ _AI_USAGE = (
 )
 
 
-@Client.on_message(filters.me & filters.command("ai", prefixes=PREFIXES))
+@Client.on_message(OWNER_FILTER & filters.command("ai", prefixes=PREFIXES))
 @safe_handler
 async def ai_command(client, message):
     """Manage AI settings, personas, conversation memory, and model selections."""

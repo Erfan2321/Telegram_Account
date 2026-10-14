@@ -142,18 +142,24 @@ Prefixes: `.` or `/`
 There are exactly two levels:
 
 - **Owner** — the account the bot runs on. Nothing to register; Pyrogram identifies it with
-  the `filters.me` filter. Configuration commands (`.adduser`, `.addseen`, `.ai`) are
-  owner-only.
+  `filters.me`. Configuration commands (`.adduser`, `.addseen`, `.ai`) are owner-only
+  (`OWNER_FILTER`).
 - **Authorized users** — ids added with `.adduser`, stored in the `authorized_users` table.
-  Every other command (`AUTH_FILTER = filters.me | authorized users`) works for them too.
+  Every other command (`AUTH_FILTER` = owner or authorized user) works for them too.
 
 Any message from anyone else is ignored completely — the bot does not even reply with an
 error to someone outside these two groups.
 
+**A forwarded message is never a command**, whoever forwards it. Forwarding a message that
+happens to start with `.del 10` or `/gban` into a chat does nothing; both filters above exclude
+forwards. The one case that cannot be caught is a forward sent with *Hide sender's name*:
+Telegram delivers it as a plain message, indistinguishable from typing it.
+
 > ⚠️ "Authorized user" is a high trust level, not a limited role. Such a user can run `.send`
 > (reading messages from any of your private chats) and `.gban` (banning across every group
 > you manage). Only grant it to someone you would trust with the account itself — or change
-> the decorators on the sensitive commands in `plugins/` to `filters.me`.
+> the decorators on the sensitive commands in `plugins/` to `OWNER_FILTER` (not bare
+> `filters.me`, which would let forwarded commands through again).
 
 ### Administration (owner only)
 
@@ -215,7 +221,7 @@ database as well.
 >
 > ⚠️ Like the other utilities, these are gated by `AUTH_FILTER`, meaning **authorized users can
 > run them too**. If you do not want that reach, change the decorators in
-> `plugins/group_admin.py` to `filters.me`.
+> `plugins/group_admin.py` to `OWNER_FILTER`.
 
 ### AI (authorized users)
 
@@ -298,7 +304,7 @@ documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 - Model and persona commands are deliberately owner-only: changing the persona is a
   configuration-injection path.
 - Note that `.send` lets authorized users republish messages from **any** of the owner's
-  private chats into a chat they can see. Restrict that decorator to `filters.me` if you do
+  private chats into a chat they can see. Restrict that decorator to `OWNER_FILTER` if you do
   not want that level of access.
 - The **TTL media guard** deliberately retains media the sender expected to disappear. The
   sender gets no notification (unlike a screenshot in a secret chat) and the media stays
@@ -330,6 +336,7 @@ without right-to-left reordering), while the messages sent inside Telegram are P
 | `.img` returns a quota error | Google's image models have a zero quota on the free plan. |
 | The container keeps restarting | `restart: unless-stopped` ignores the exit code, so a configuration error (code 2) creates a restart loop. Check `docker compose logs`; the cause is almost always an incomplete `.env`. |
 | The bot does not respond to a command | The sender is neither the owner nor on the authorized list — the silence is deliberate. Add them with `.adduser` from your own account. |
+| A command inside a forwarded message does nothing | Deliberate: a forward is never treated as a command, not even the owner's. Type or paste the command instead. |
 
 **Exit codes** (for systemd and Docker):
 `2` configuration · `3` creating `data/` · `4` database · `5` connecting to Telegram ·

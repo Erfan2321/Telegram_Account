@@ -29,7 +29,7 @@ Protected content ("Restrict saving content"):
     preview — a copy, without the "forwarded from" header. Text, polls,
     locations and contacts need no download and are simply re-sent.
 
-Owner only (`filters.me`): an authorized third party could otherwise pull
+Owner only (`OWNER_FILTER`): an authorized third party could otherwise pull
 content out of every private channel this account belongs to. The command
 message also has to be ours, to be deleted at the end.
 """
@@ -59,6 +59,7 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 
+from plugins.general import OWNER_FILTER
 from utils import paths
 from utils.helpers import describe, flood_seconds, respond, safe_delete, safe_handler
 
@@ -272,10 +273,11 @@ def _links_of(message) -> list:
 # --- Echo guard ---
 # A copy is a brand-new message of ours. If its text or caption happens to be
 # ".fwd <link>", it matches this very command — and a post linking to itself
-# would then forward itself forever. Forwarded messages are kept out by the
-# filter (~filters.forwarded); copies register their text here *before* they
-# are sent, since the update can arrive before the send call returns, and the
-# handler consumes the entry. The same one-shot pattern as IGNORE_DELETED_IDS.
+# would then forward itself forever. Forwarded messages are kept out by
+# OWNER_FILTER, as for every command; copies register their text here
+# *before* they are sent, since the update can arrive before the send call
+# returns, and the handler consumes the entry. The same one-shot pattern as
+# IGNORE_DELETED_IDS.
 _ECHOES = {}  # {(chat_id, text): monotonic expiry}
 
 _COMMAND_LIKE = re.compile(r"^[/.](?:fwd|forward)(?:@\w+)?(?:\s|$)", re.IGNORECASE)
@@ -852,9 +854,7 @@ def _report(total: int, failures) -> str:
     return "\n\n".join(parts)
 
 
-@Client.on_message(
-    filters.me & ~filters.forwarded & filters.command(COMMANDS, prefixes=PREFIXES)
-)
+@Client.on_message(OWNER_FILTER & filters.command(COMMANDS, prefixes=PREFIXES))
 @safe_handler
 async def forward_by_link_command(client, message):
     """Bring the message(s) behind one or more links into this chat."""

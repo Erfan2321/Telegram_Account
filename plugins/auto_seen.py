@@ -13,6 +13,7 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 
+from plugins.general import OWNER_FILTER
 from utils.db_manager import AUTO_SEEN_CHATS, add_auto_seen, remove_auto_seen
 from utils.helpers import describe, respond, safe_handler
 
@@ -88,7 +89,7 @@ async def _resolve_target(client, message):
 
 
 # 2. Command: Add chat to auto-read list
-@Client.on_message(filters.me & filters.command("addseen", prefixes=PREFIXES))
+@Client.on_message(OWNER_FILTER & filters.command("addseen", prefixes=PREFIXES))
 @safe_handler
 async def add_seen_cmd(client, message):
     target_chat_id, chat_title, error = await _resolve_target(client, message)
@@ -111,7 +112,7 @@ async def add_seen_cmd(client, message):
 
 
 # 3. Command: Remove chat from auto-read list
-@Client.on_message(filters.me & filters.command("delseen", prefixes=PREFIXES))
+@Client.on_message(OWNER_FILTER & filters.command("delseen", prefixes=PREFIXES))
 @safe_handler
 async def remove_seen_cmd(client, message):
     target_chat_id, chat_title, error = await _resolve_target(client, message)
