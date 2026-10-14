@@ -70,6 +70,16 @@ def _global_cache(kind):
     raise ValueError(f"unknown global list kind: {kind!r}")
 
 
+# --- Switches toggled from Telegram (e.g. `.botclean on`) ---
+# Shape: {key: value}, both strings.
+#
+# One key/value table rather than a table per switch: a switch is a single row
+# and nothing ever queries across them, so a new one costs a key name instead
+# of a migration. Read straight from RAM like the caches above — the bot-chat
+# cleaner consults its switch on every message a bot sends.
+SETTINGS = {}
+
+
 # --- Transient state: deletions we performed ourselves ---
 # Shape: {message_id: registration time}
 #
@@ -229,6 +239,16 @@ async def init_db():
                 )
             ''')
 
+        # --- Switches toggled from Telegram ---
+        # CREATE TABLE IF NOT EXISTS is the whole migration: an older database
+        # simply gains the table, and every switch starts at its default.
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
+
         await db.commit()
 
         # Load the lists from the database into the RAM caches.
@@ -249,6 +269,10 @@ async def init_db():
             async with db.execute(f'SELECT user_id, reason FROM {table}') as cursor:
                 async for row in cursor:
                     cache[row[0]] = row[1] or ""
+
+        async with db.execute('SELECT key, value FROM settings') as cursor:
+            async for row in cursor:
+                SETTINGS[row[0]] = row[1]
 
     log.info(
         "database ready — %d authorized user(s), %d auto-seen chat(s), "
@@ -329,6 +353,31 @@ async def remove_auto_seen(chat_id):
     AUTO_SEEN_CHATS.discard(chat_id)
     async with _connect() as db:
         await db.execute('DELETE FROM auto_seen_chats WHERE chat_id = ?', (chat_id,))
+        await db.commit()
+
+
+# --- Switches toggled from Telegram ---
+def get_setting(key, default=None):
+    """Read a switch from the RAM cache (never touches disk)."""
+    return SETTINGS.get(key, default)
+
+
+async def set_setting(key, value):
+    """
+    Write a switch; RAM first, then the database (write-through).
+
+    If the disk write fails the exception propagates to the command, which
+    reports it; the switch then holds for this run only and is back at its
+    stored value after a restart.
+    """
+    value = str(value)
+    SETTINGS[key] = value
+    async with _connect() as db:
+        await db.execute(
+            'INSERT INTO settings (key, value) VALUES (?, ?) '
+            'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+            (key, value)
+        )
         await db.commit()
 
 

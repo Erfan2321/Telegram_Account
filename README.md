@@ -41,6 +41,8 @@ Both are gitignored by default.
 | 🗑 **Anti-delete** | Private messages (both directions) are cached for 12 hours; a deletion is reported to Saved Messages — photos, voices, stickers, GIFs and video notes come back as the file itself, with the send and delete times |
 | 🕵️ **TTL media guard** | Timed and view-once media — photo, video, video note, voice, GIF, audio, file — is saved before it can be viewed |
 | 👁 **Auto-seen** | Automatic read receipts for selected chats |
+| 🧹 **Bot-chat cleaner** | `.botclean on`: when a bot messages you in a chat you already deleted, the message goes away with the chat — no need to fill the block list |
+| 🔗 **Forward by link** | `.fwd <link>` brings a message or album here from any channel or group you can see, private and protected ones included |
 | 👮 **Member control** | Kick, ban and mute (with optional duration) in a group |
 | 🌐 **Global actions** | `.gban` / `.gmute` across every managed group, enforced on later messages too |
 | 🔐 **Authorization layer** | Owner-only commands separated from authorized users |
@@ -160,6 +162,8 @@ error to someone outside these two groups.
 | `.adduser` / `.deluser` | Add or remove an authorized user |
 | `.addseen` / `.delseen` | Add or remove an auto-seen chat |
 | `.ai model` \| `models` \| `persona` \| `reset` \| `status` | AI configuration |
+| `.fwd <link> [link …]` / `.forward` | Forward the linked message here — public or private (`t.me/c/…`) channels and groups, topics, `?single`, `?comment=`. Sent as a reply with no link, it reads the link from the replied message. On a protected chat the file is downloaded and re-uploaded as a copy. The command message is removed on success |
+| `.botclean on` \| `off` | Bot-chat cleaner. With it on, a bot that writes into a chat you deleted (nothing of yours in it) has its message deleted together with the chat entry. Chats with any message of yours are never touched. `.botclean` alone shows the state and the last clean-ups |
 
 ### Utilities (authorized users)
 
@@ -248,7 +252,8 @@ database as well.
 ├── data/                   ⚠️ runtime state — fully gitignored
 │   ├── my_account.session      Telegram session (= full account access)
 │   ├── logger.db               SQLite database (real private messages)
-│   └── ttl_media/              local copies of TTL media (only when enabled)
+│   ├── ttl_media/              local copies of TTL media (only when enabled)
+│   └── forward_tmp/            .fwd scratch space for protected files (emptied after each run)
 │
 ├── plugins/                handlers — auto-discovered by Pyrogram
 │   ├── general.py              authorization commands + general utilities
@@ -258,7 +263,9 @@ database as well.
 │   ├── ai_tools.py             .tr / .ocr / .img
 │   ├── voice_tools.py          .stt / .tts
 │   ├── ttl_guard.py            self-destructing media capture (raw handler, group -1)
-│   └── group_admin.py          member control + global actions (enforcement, group -2)
+│   ├── group_admin.py          member control + global actions (enforcement, group -2)
+│   ├── bot_cleaner.py          .botclean — deletes bot messages in chats you deleted (group 3)
+│   └── link_forward.py         .fwd — forward by message link, protected chats included
 │
 └── utils/                  helper modules (no dependency on the handlers)
     ├── paths.py                project paths — single source of truth
@@ -297,6 +304,9 @@ documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
   sender gets no notification (unlike a screenshot in a secret chat) and the media stays
   "unviewed" on their side. This means other people's private content accumulates in `data/`
   and in your Saved Messages — set `TTL_GUARD=false` to turn it off.
+- On a chat with **protected content** ("Restrict saving content"), `.fwd` downloads the file
+  and uploads a copy, which sidesteps the owner's restriction. It is owner-only for that
+  reason; mind the rights of whoever published the content.
 
 ---
 

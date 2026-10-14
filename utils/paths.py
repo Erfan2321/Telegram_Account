@@ -44,6 +44,12 @@ TTL_MEDIA_DIR = DATA_DIR / "ttl_media"
 # belongs under the directory the gitignore rules already cover.
 DELETED_MEDIA_DIR = DATA_DIR / "deleted_media"
 
+# Scratch space for `.fwd`, used when a message from a protected chat has to be
+# downloaded and uploaded again. Every run works in its own subdirectory and
+# removes it when it ends. Under data/ for the same reason as the two above:
+# what passes through it is other people's content.
+FORWARD_TMP_DIR = DATA_DIR / "forward_tmp"
+
 # Pyrogram session name. Pyrogram builds the real filename itself from
 # workdir + name: data/my_account.session
 SESSION_NAME = "my_account"

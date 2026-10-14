@@ -48,9 +48,9 @@ class NoiseRule(NamedTuple):
     note   : an explanation appended to the log line, to make it actionable
 
     A maintenance note: needle has to match the *actual* text of the target
-    log call. For the project's own rules (auto_seen and group_admin) that
-    means changing the message means changing it here too — the boot test does
-    not catch this.
+    log call. For the project's own rules (auto_seen, group_admin and
+    bot_cleaner) that means changing the message means changing it here too —
+    the boot test does not catch this.
     """
     logger: str
     needle: str
@@ -112,8 +112,8 @@ NOISE_RULES = (
     ),
 
     # --- Group 4: handlers that run on every message ---
-    # Neither handler carries @safe_handler (its error message would go to the
-    # other party's chat), so a log line is their only output — and without
+    # None of these handlers carries @safe_handler (its error message would go
+    # to the other party's chat), so a log line is their only output — and without
     # throttling they produce one per *message*. The needle has to stay in
     # sync with the log text in those modules.
     NoiseRule(
@@ -123,6 +123,10 @@ NOISE_RULES = (
     NoiseRule(
         "plugins.group_admin", "global-list enforcement failed", 300.0, logging.WARNING,
         "check whether the account still has ban rights in that group",
+    ),
+    NoiseRule(
+        "plugins.bot_cleaner", "bot-clean failed", 300.0, logging.WARNING,
+        "the message was left alone; turn the cleaner off with .botclean off if this persists",
     ),
 
     # --- Group 5: background-task errors ---

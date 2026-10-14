@@ -56,7 +56,8 @@ config.py                env loading with fail-fast validation
 README.md                public-facing docs (Persian)
 data/                    runtime state — fully gitignored (§3.1)
   my_account.session     Pyrogram session = full account access
-  logger.db              SQLite: message cache, auth, AI memory
+  logger.db              SQLite: message cache, auth, AI memory, switches
+  forward_tmp/           .fwd scratch space, one subdirectory per run (§8.5)
 plugins/                 Pyrogram smart-plugin root (auto-discovered)
   general.py             auth commands + .ping .weather .del .gold .azan .id .help
   logger.py              anti-delete cache + deletion reporting
@@ -66,6 +67,8 @@ plugins/                 Pyrogram smart-plugin root (auto-discovered)
   voice_tools.py         .stt speech→text, .tts text→voice (§6.4)
   ttl_guard.py           self-destructing media capture — raw handler, group -1 (§8.2)
   group_admin.py         .kick .ban .mute + global .gban/.gmute — enforcement in group -2 (§8.3)
+  bot_cleaner.py         .botclean — bot messages in chats you deleted, group 3 (§8.4)
+  link_forward.py        .fwd — forward by message link, protected chats included (§8.5)
 utils/
   paths.py               PROJECT_ROOT / DATA_DIR / DB_PATH — single source of truth (§3.1)
   db_manager.py          aiosqlite access + RAM caches + transient state
@@ -111,7 +114,10 @@ ai_conversations(id INTEGER PK AUTOINCREMENT, chat_id INTEGER, role TEXT,
 ai_settings(chat_id INTEGER PRIMARY KEY, model TEXT, persona TEXT)
 gbanned_users(user_id INTEGER PRIMARY KEY, reason TEXT NOT NULL DEFAULT '', timestamp REAL NOT NULL)
 gmuted_users(user_id INTEGER PRIMARY KEY, reason TEXT NOT NULL DEFAULT '', timestamp REAL NOT NULL)
+settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 ```
+
+`settings` holds switches flipped from Telegram (`.botclean on` today). One key/value table rather than a table per switch: a switch is a single row and nothing queries across them, so a new one costs a key name, not a migration — and `CREATE TABLE IF NOT EXISTS` is the entire migration for an older database.
 
 `messages` is a rolling 12-hour cache, pruned inside `save_message()` — the prune and the insert
 share **one transaction and one commit**, since two commits per incoming private message meant two
@@ -133,7 +139,7 @@ WAL is what stops a message being cached concurrently with an AI-history read fr
 
 **Migrations.** `CREATE TABLE IF NOT EXISTS` does nothing to an existing table, so new columns need an explicit idempotent migration in `init_db()` — see the `is_outgoing` block that reads `PRAGMA table_info(messages)` before issuing `ALTER TABLE`. Follow that pattern; never drop and recreate a table, since `logger.db` holds real data. Verified against a database created before these columns existed: the rows survive and the second run is a no-op.
 
-**RAM caches.** `ALLOWED_USERS`, `AUTO_SEEN_CHATS`, `AI_SETTINGS`, `GBANNED_USERS`, `GMUTED_USERS` are module-level, loaded once in `init_db()`, and updated **write-through** (RAM first, then disk). Custom filters read only from RAM so filter evaluation never touches the disk — this matters most for the two global lists, whose filter runs on *every* group message.
+**RAM caches.** `ALLOWED_USERS`, `AUTO_SEEN_CHATS`, `AI_SETTINGS`, `GBANNED_USERS`, `GMUTED_USERS`, `SETTINGS` are module-level, loaded once in `init_db()`, and updated **write-through** (RAM first, then disk). Custom filters read only from RAM so filter evaluation never touches the disk — this matters most for the two global lists, whose filter runs on *every* group message, and for `SETTINGS`, which the bot-chat cleaner reads on every message a bot sends.
 
 ---
 
@@ -376,6 +382,8 @@ a Persian error, never to a wrong number or a traceback.
 | `.img <prompt>` | authorized | generate or edit an image (**needs a paid key**) |
 | `.aistop` | authorized | halt an in-flight generation |
 | `.ai model/models/persona/reset/status` | owner | AI configuration |
+| `.fwd <link> [link …]` / `.forward` | owner | forward linked message(s) here; protected chats are re-uploaded as copies (§8.5) |
+| `.botclean on/off` / `.botclean` | owner | delete what bots send into chats you deleted; status (§8.4) |
 
 All AI commands accept a model alias and `extended` as leading words (`.ask pro extended …`, `.sum lite 100`); `_extract_flags()` stops at the first non-flag word and keeps the remaining text — including newlines — intact.
 
@@ -537,6 +545,44 @@ Every command here is `AUTH_FILTER`, matching the other utilities — so **an au
 
 ---
 
+## 8.4 Bot-chat cleaner (`plugins/bot_cleaner.py`)
+
+A bot you once started keeps the right to message you after you delete the chat, and the only built-in way to stop it is a block — which fills the block list with advertising bots. With `.botclean on` (persisted in `settings`, off by default), a bot message that lands in an otherwise empty chat is deleted **together with the chat entry**, and the bot stays unblocked.
+
+**What "a chat you deleted" means, exactly.** One raw `messages.getHistory` (30 messages) and the chat must hold nothing but the bot's own messages, with: nothing you sent (`out`), no service line, nothing older than `BURST_WINDOW` (10 min) before the newest, and nothing this module saw while the chat was in use. The reasoning is that a bot can only reach someone who wrote to it or granted it access (login widget, mini app, payment), and each leaves a trace — your message or a service line — so a chat with neither was emptied by hand. Telegram's own accounts (`777000`, `@replies`, `@BotFather`, Verification Codes, …) are excluded by id regardless.
+
+`BURST_WINDOW` exists because updates are not handled in order: two ads a second apart can arrive newest-first, and the second must not mistake the first for "older history". It is also why a bot message that sat in the chat from before (downtime, or the switch was off) makes the cleaner leave that chat alone until it is deleted once by hand. That is the deliberate direction to be wrong in — the other direction deletes messages.
+
+**Why the deletion is `messages.deleteHistory`.** With `just_clear` unset it is exactly the official apps' "Delete chat": messages *and* the list entry go. Deleting the messages one by one would leave an empty chat sitting in the list, which is the clutter the feature exists to remove. It deletes everything up to `max_id`, so it is safe only because the read immediately before saw the whole chat (a `MessagesSlice` announcing more than it carries means "keep"): every message up to `max_id` is one of the burst, anything newer has a higher id and is judged by its own handler. `revoke` stays unset, as in the official apps for a bot. The call repeats while the server returns `offset > 0`, bounded by `DELETE_ROUNDS`. The ids are passed to `mark_deletions_ignored()` first, like `.del` — the logger never caches bot chats, so this is belt and braces.
+
+**Only "keep" is cached.** Bots in active use send most bot messages, so a keep verdict is remembered for `KEEP_TTL` (6 h) and costs those messages nothing. A delete verdict is never cached: the read behind it is what proves nothing of yours is in the chat *at that moment*, and that read is the whole safety argument. Your own message in a bot chat, or an incoming service line, sets "keep" with no read at all. A per-bot `asyncio.Lock` makes a burst one read and one delete; handlers queued behind it see their id in `_DELETED` and stop.
+
+**Invalidation without a chat id.** Deleting a chat on the phone arrives as `UpdateDeleteMessages` — ids only, no peer, for every private chat. So the ids of messages seen while a chat was in use go into `_OWNER` (`message_id → bot_id`, bounded), and `forget_deleted` (a `DeletedMessagesHandler` in the same group) drops the bot's verdict when any of them is deleted. The next message is judged afresh, and a remembered message that is still in the history then counts as proof the chat was not cleared. That last rule is not decoration: without it, a bot that deletes your `/start` (some menu bots do), or you deleting one message, would drop the verdict and leave a chat of fresh bot messages that looks exactly like an emptied one. Incoming messages are deliberately *not* tracked before their verdict, since an ad being tracked would protect itself.
+
+**`group=3`.** The watcher matches every message in a bot chat, so it needs a group of its own (§8.2's one-handler-per-group rule); placing it after `logger` (2) means every other handler has seen a message before this one can delete it. There is no `@safe_handler` (§10.5): failures log `bot-clean failed …`, throttled by a `NOISE_RULES` entry, and leave the message alone. `.botclean` keeps per-run counters and the last eight clean-ups — a false positive has to be visible somewhere the user looks, not only in a log.
+
+Known limit: the userbot cannot stop the push notification for the ad; the message is deleted after it has been delivered to your devices.
+
+---
+
+## 8.5 Forward by link (`plugins/link_forward.py`)
+
+`.fwd <link> [link …]` brings the linked message into the chat the command is typed in (inside the same forum topic), then deletes the command message — only the forwarded content remains. With no link and sent as a reply, it reads links from the replied message, hidden hyperlinks (`text_link` entities) included. Owner only (`filters.me`): an authorized user could otherwise pull content out of every private channel the account is in.
+
+**Links.** `t.me` / `telegram.me` / `telegram.dog`, public `/<username>/<id>` (also the `/s/` web form) and private `/c/<id>/<id>`, an optional topic segment, `?single` (that album item only; otherwise the whole album via `get_media_group`, in id order), `?comment=<id>` (resolved through the channel's `linked_chat`), and `tg://privatepost` / `tg://resolve`. A path deeper than topic/message is refused rather than read wrongly, and trailing sentence punctuation does not eat `?single`.
+
+**Private links carry only an id.** The session reaches a chat only through a stored access hash, and a channel that has produced no update since login is not stored. On an unresolvable id `_load_from_dialogs()` pages through raw `messages.GetDialogs` until the channel shows up — `client.invoke` stores every page's chats itself — and the call is retried once. Raw, not `get_dialogs()`, because the high-level generator parses each dialog's top message with its reply: a request per dialog for nothing. Cursor and guards follow §8.3.2.
+
+**The peer must be a channel.** `t.me/<name>/<n>` also resolves for a user or a bot, and the request it turns into (`messages.getMessages`) ignores the peer entirely — it would return message *n* of some private chat of this account. `_fetch()` refuses anything that is not an `InputPeerChannel`, and checks the returned message's chat id as well.
+
+**Protected content.** Telegram refuses to forward from a chat with "Restrict saving content" (`ChatForwardsRestricted`, or the per-message `has_protected_content` flag, checked first to skip a doomed request), but serves the files to every member. So the message is rebuilt: text, polls, locations and contacts through `Message.copy()` (no file involved; source buttons dropped — only bots may send them), a sticker by id first, and every other kind downloaded into a per-run directory under `data/forward_tmp/` and uploaded again with its original duration, dimensions, preview, spoiler, streaming flag, waveform and caption entities (`ParseMode.DISABLED`, so a stray `*` stays a character). A protected album goes back as one `send_media_group`; anything that cannot be grouped goes item by item. The file on disk is named by us (`<id>_<kind><ext from mime>`) because Pyrogram joins the sender's file name onto the directory unchecked — `../../x` would escape — and the extension decides the mime type the senders re-guess; the original name travels only as the upload's `file_name` label. A file above the account's upload ceiling (2000 / 4000 MiB) is refused before downloading. Progress is edited into the command message at most every 4 s with direct, failure-swallowing edits — `respond()` would sleep out a FloodWait inside the transfer loop it is reporting on.
+
+**Echo guard.** A copy is a new message of ours. If its text or caption reads `.fwd <link>`, it matches this very command, and a post linking to itself would forward itself forever. Forwards are excluded by the filter (`~filters.forwarded`); copies register `(chat, text)` in `_ECHOES` *before* sending and the handler consumes the entry — the one-shot pattern of `IGNORE_DELETED_IDS` (§5.4), for the same reason: the update can arrive before the send call returns.
+
+**Failures are per link.** A `LinkError` carries an English reason for the log and a Persian `.text` for the user (keeping the §10.2 language split without a second `MediaError`); other RPC errors are reported with their name, and a `FloodWait` stops the batch and marks the rest as not done. On any failure the command message is replaced by a per-link report instead of being deleted; the scratch directory is removed in a `finally` either way, and stale ones left by a killed run are swept after a day.
+
+---
+
 ## 9. Running
 
 ```bash
@@ -607,9 +653,9 @@ Compose used to mount the whole project (`./:/app`), which overlaid the image's 
 
 5. **Wrap command handlers in `@safe_handler`** (below the `@Client.on_message` decorator) so
    failures log a traceback and show a short Persian error instead of dying inside Pyrogram's
-   dispatcher. **Do not put it on handlers that run on every message** — `logger`, `auto_seen` and
+   dispatcher. **Do not put it on handlers that run on every message** — `logger`, `auto_seen`, `bot_cleaner.watch_bot_chats` and
    `group_admin.enforce_global_flags` deliberately omit it, because its error message would be
-   posted into the other party's chat once per message. Those three carry their own `try/except`
+   posted into the other party's chat once per message. Those four carry their own `try/except`
    that only logs.
 
 6. **`FloodWait.value` is not guaranteed to be a number.** `RPCError.__init__` does
@@ -716,11 +762,12 @@ Defensive details, all of which exist because a wrong offset breaks a working bo
 
 Nothing is discarded outright; repetition is. Each known-noise pattern is shown **once per window** and the suppressed count is appended to the next line that gets through, so a real outage still shows up — as one line instead of two hundred. Rules live in `NOISE_RULES` and carry an English `note` that turns the library's message into something actionable (the `BadMsgNotification` line, for instance, gains a pointer to `CLOCK_SYNC`).
 
-Two rules match **our own** log lines rather than Pyrogram's — `plugins.auto_seen` on
-`"auto-seen failed"` and `plugins.group_admin` on `"global-list enforcement failed"`. Both handlers
-run on every message and deliberately have no `@safe_handler` (§10.4), so a log line is their only
-output and an unreachable chat would otherwise produce one per message. **The needle is a literal
-substring of the emitting `log.warning`,** so changing either message silently disables its rule;
+Three rules match **our own** log lines rather than Pyrogram's — `plugins.auto_seen` on
+`"auto-seen failed"`, `plugins.group_admin` on `"global-list enforcement failed"` and
+`plugins.bot_cleaner` on `"bot-clean failed"`. All three handlers run on every message and
+deliberately have no `@safe_handler` (§10.5), so a log line is their only output and an
+unreachable chat would otherwise produce one per message. **The needle is a literal substring of
+the emitting `log.warning`,** so changing any of those messages silently disables its rule;
 nothing in the boot test catches that. A comment sits at both ends saying so.
 
 The filter is installed on the **root handler, not on loggers**, because a logger's filters do not apply to records from its children — `pyrogram.session.session` records would bypass a filter attached to `pyrogram`. It throttles on `time.monotonic()`: a project whose central problem is an untrustworthy wall clock must not build its rate limiter on one. Matched records lose their traceback (these failures are known and one line says everything) and are re-levelled per rule; **anything unmatched passes through completely untouched**.
